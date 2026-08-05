@@ -1,119 +1,319 @@
-name: Phase 1 - Setup
+name: Phase 3 - Build APK
 on:
   push:
     branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
+  actions: write
 env:
   CI: "true"
   NB_WEB_DIR: "dist"
+  VITE_SUPABASE_URL: "https://placeholder.supabase.co"
+  VITE_SUPABASE_PUBLISHABLE_KEY: "placeholder"
+  VITE_SUPABASE_ANON_KEY: "placeholder"
+  VITE_SUPABASE_PROJECT_ID: "placeholder"
 jobs:
-  setup:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: "Phase 1 - Set up Node.js 20"
+      - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-      - name: "Phase 1 - Set up JDK 21"
+          node-version: '20'
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: "21"
-          distribution: "temurin"
-      - name: "Phase 1 - Extract source code"
+          java-version: '21'
+          distribution: 'temurin'
+      - name: Extract source code
         run: |
           unzip -o source.zip -d project-src
           node -e "const fs=require('fs'),path=require('path');function walk(d,depth,out){if(depth>3||!fs.existsSync(d))return;for(const e of fs.readdirSync(d,{withFileTypes:true})){if(e.name==='node_modules'||e.name.startsWith('.'))continue;const p=path.join(d,e.name);if(e.isDirectory())walk(p,depth+1,out);}if(fs.existsSync(path.join(d,'package.json')))out.push(d);}const c=[];walk('project-src',0,c);function s(p){try{const j=JSON.parse(fs.readFileSync(path.join(p,'package.json'),'utf8'));const d={...j.dependencies,...j.devDependencies};let x=0;if(d['@capacitor/core'])x+=100;if(j.scripts&&j.scripts.build)x+=50;if(d.vite||d.next||d['react-scripts']||d['@angular/core']||d.nuxt||d.svelte)x+=20;if(Array.isArray(j.workspaces))x-=200;return x-p.split('/').length;}catch(e){return -999;}}c.sort((a,b)=>s(b)-s(a));console.log(c[0]||'');" > .pr.txt
           PROJECT_ROOT=$(cat .pr.txt); rm -f .pr.txt
-          if [ -z "$PROJECT_ROOT" ]; then
-            STATIC_ROOT=$(find project-src -maxdepth 3 -name "index.html" -not -path "*/node_modules/*" -exec dirname {} \; | head -1)
-            if [ -z "$STATIC_ROOT" ]; then echo "No package.json AND no index.html in source.zip"; exit 1; fi
-            PROJECT_ROOT="$STATIC_ROOT"
-            echo "Static HTML detected → synthesizing package.json at $PROJECT_ROOT"
-            cat > "$PROJECT_ROOT/package.json" <<'STATICPKG'
-          {"name":"static-html-app","version":"1.0.0","private":true,"scripts":{"build":"node -e "const fs=require('fs'),path=require('path');fs.mkdirSync('dist',{recursive:true});function cp(s,d){for(const e of fs.readdirSync(s,{withFileTypes:true})){if(e.name==='node_modules'||e.name==='dist'||e.name==='android'||e.name==='ios'||e.name.startsWith('.'))continue;const sp=path.join(s,e.name),dp=path.join(d,e.name);if(e.isDirectory()){fs.mkdirSync(dp,{recursive:true});cp(sp,dp);}else fs.copyFileSync(sp,dp);}}cp('.','dist');console.log('static copy → dist');""}}
-          STATICPKG
-          fi
-          shopt -s dotglob
-          cp -r "$PROJECT_ROOT"/* ./ 2>/dev/null || true
-          shopt -u dotglob
+          if [ -z "$PROJECT_ROOT" ]; then exit 1; fi
+          shopt -s dotglob && cp -r "$PROJECT_ROOT"/* ./ 2>/dev/null || true && shopt -u dotglob
           rm -rf project-src source.zip
           rm -f capacitor.config.ts capacitor.config.js capacitor.config.json
-
-      - name: "Phase 1 - Install npm dependencies"
-        run: |
-          rm -f bun.lockb bun.lock yarn.lock pnpm-lock.yaml
-          npm install --legacy-peer-deps
-      - name: "Phase 1 - Install Capacitor + Android platform"
-        run: |
-          CAP_VERSION=$(node -e "try{const p=require('./package.json');console.log((p.dependencies&&p.dependencies['@capacitor/core'])||(p.devDependencies&&p.devDependencies['@capacitor/core'])||'6.2.0')}catch(e){console.log('6.2.0')}" | sed 's/[\^~>=<]//g')
-          npm install @capacitor/core@$CAP_VERSION @capacitor/cli@$CAP_VERSION @capacitor/android@$CAP_VERSION --legacy-peer-deps
-          # Build web output (best-effort) so cap add android does not complain
-          if ! npm run build 2>/dev/null; then
-            mkdir -p dist
-            [ -f dist/index.html ] || echo "<!DOCTYPE html><html><body></body></html>" > dist/index.html
-          fi
-          rm -f capacitor.config.ts capacitor.config.js capacitor.config.json
-          npx cap init "sggts" "com.nativebridge.app" --web-dir "dist" || true
-          npx cap add android || echo "cap add android may have failed (will retry in Phase 2)"
-
-      - name: "Phase 1 - Generate manifest"
-        run: |
-          cat > /tmp/gen-manifest.cjs <<'GENMANIFEST'
-          const fs = require('fs');
-          const path = require('path');
-          const p = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'));
-          const deps = { ...(p.dependencies || {}), ...(p.devDependencies || {}) };
-          let report = '';
-          try { report = fs.readFileSync('plugin-install-report.txt', 'utf8'); } catch (e) {}
-          const reportLines = report.split('\n').filter(Boolean);
-          const pluginsInstalled = reportLines.filter(l => l.startsWith('OK ')).map(l => l.slice(3).trim());
-          const pluginsFailed    = reportLines.filter(l => l.startsWith('FAIL ')).map(l => l.slice(5).trim());
-          const pluginsSkipped   = reportLines.filter(l => l.startsWith('SKIP ')).map(l => l.slice(5).trim());
-          const m = {
-            appRoot: './',
-            installedDeps: Object.keys(p.dependencies || {}).map(k => k + '@' + p.dependencies[k]),
-            installedDevDeps: Object.keys(p.devDependencies || {}).map(k => k + '@' + p.devDependencies[k]),
-            plugins: Object.keys(deps).filter(k => k.startsWith('@capacitor/') || k.startsWith('capacitor-') || k.startsWith('@capawesome/') || k.includes('cordova-plugin')),
-            pluginsInstalled, pluginsFailed, pluginsSkipped,
-            hasAndroidFolder: fs.existsSync('android'),
-            buildOutputDir: fs.existsSync('dist') ? 'dist' : (fs.existsSync('build') ? 'build' : 'dist'),
-          };
-          fs.writeFileSync('phase1-manifest.json', JSON.stringify(m, null, 2));
-          console.log(JSON.stringify(m, null, 2));
-          GENMANIFEST
-          node /tmp/gen-manifest.cjs
-      - name: "Phase 1 - Bundle source artifact"
-        run: |
-          mkdir -p phase1-out
-          cp package.json phase1-out/ 2>/dev/null || true
-          cp package-lock.json phase1-out/ 2>/dev/null || true
-          cp capacitor.config.json phase1-out/ 2>/dev/null || true
-          cp capacitor.config.ts phase1-out/ 2>/dev/null || true
-          cp phase1-manifest.json phase1-out/ 2>/dev/null || true
-          cp plugin-install-report.txt phase1-out/ 2>/dev/null || true
-          if [ -d android ]; then cp -r android phase1-out/android; fi
-          cd phase1-out && zip -r ../phase1-source.zip . > /dev/null && cd ..
-          ls -la phase1-source.zip
-      - name: "Phase 1 - Cache npm"
-        uses: actions/cache/save@v4
+      - name: 'Phase 3 · Restore npm cache'
+        id: npm-cache
+        uses: actions/cache@v4
         continue-on-error: true
         with:
           path: |
             ~/.npm
             node_modules
-          key: npm-setup-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-      - name: "Phase 1 - Report installed"
+          key: npm-rebuild-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            npm-rebuild-${{ runner.os }}-
+            npm-setup-${{ runner.os }}-
+      - name: 'Phase 3 · Restore Gradle cache'
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-build-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            gradle-build-${{ runner.os }}-
+            gradle-setup-${{ runner.os }}-
+      - name: 'Phase 3 · Clean Gradle JAR cache'
+        run: rm -rf ~/.gradle/caches/jars-9 ~/.gradle/caches/transforms-* || true
+      - name: 'Phase 3 · Sync npm dependencies'
         run: |
-          echo "=== SETUP_COMPLETE ==="
-          npm ls --depth=0 2>/dev/null | tail -30
-      - name: "Phase 1 - Upload source artifact"
+          rm -f bun.lockb bun.lock yarn.lock pnpm-lock.yaml
+          # Always ensure node_modules is present and matches package.json — never trust cache alone
+          if [ ! -d "node_modules" ] || [ ! -d "node_modules/.bin" ]; then
+            echo "=== Cache miss or incomplete — running fresh npm install ==="
+            npm install --legacy-peer-deps --no-audit
+          else
+            echo "=== node_modules restored from cache, syncing ==="
+            npm install --legacy-peer-deps --prefer-offline --no-audit 2>&1 || {
+              echo "=== Sync failed, falling back to fresh install ==="
+              rm -rf node_modules
+              npm install --legacy-peer-deps --no-audit
+            }
+          fi
+          echo "=== Dependencies ready ==="
+          ls node_modules/.bin/ 2>/dev/null | head -10 || echo "WARNING: node_modules/.bin missing"
+      - name: 'Phase 3 · Reconcile enabled plugins'
+        run: |
+          # Desired plugin set comes from the platform's current enabled list.
+          # Any installed @capacitor/* / @capawesome/* / @capacitor-community/* package
+          # NOT in this list (and not also a transitive dep) is uninstalled, so
+          # toggling a plugin OFF in the UI actually changes the next build.
+          cat > /tmp/desired-plugins.json <<'DPJSON'
+          []
+          DPJSON
+          node -e "
+            const fs=require('fs');
+            const desired=new Set(JSON.parse(fs.readFileSync('/tmp/desired-plugins.json','utf8')));
+            const pkg=require('./package.json');
+            const deps={...(pkg.dependencies||{}), ...(pkg.devDependencies||{})};
+            const PLUGIN_PREFIXES=['@capacitor/','@capawesome/','@capawesome-team/','@capacitor-community/','@capacitor-mlkit/','@nicasource/capacitor-','@mozartec/capacitor-','@byteowls/capacitor-','@codetrix-studio/capacitor-'];
+            const KEEP=new Set(['@capacitor/core','@capacitor/cli','@capacitor/android','@capacitor/ios','@capacitor/app']);
+            const toRemove=Object.keys(deps).filter(k=>PLUGIN_PREFIXES.some(p=>k.startsWith(p)) && !KEEP.has(k) && !desired.has(k));
+            fs.writeFileSync('/tmp/plugins-to-remove.txt', toRemove.join('\n'));
+            console.log('Desired:', [...desired]);
+            console.log('Removing:', toRemove);
+          "
+          if [ -s /tmp/plugins-to-remove.txt ]; then
+            xargs -a /tmp/plugins-to-remove.txt -r npm uninstall --legacy-peer-deps || echo 'uninstall warning (non-fatal)'
+          fi
+
+      - name: 'Phase 3 · Auto-install missing Capacitor packages'
+        run: |
+          echo "=== Scanning source for @capacitor/* and @capawesome/* imports ==="
+          cat > /tmp/scan-missing.cjs <<'SCAN_EOF'
+          const fs = require('fs'), path = require('path');
+          const pkg = require(process.cwd() + '/package.json');
+          const have = new Set([...Object.keys(pkg.dependencies||{}), ...Object.keys(pkg.devDependencies||{})]);
+          const found = new Set();
+          const re = /(?:from|require\(\s*)['"]((?:@capacitor|@capawesome|@capacitor-community)\/[a-z0-9-]+)['"]/g;
+          const walk = (d) => {
+            let entries;
+            try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+            for (const e of entries) {
+              if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+              const p = path.join(d, e.name);
+              if (e.isDirectory()) walk(p);
+              else if (/\.(t|j)sx?$/.test(e.name)) {
+                const c = fs.readFileSync(p, 'utf8');
+                let m; while ((m = re.exec(c))) found.add(m[1]);
+              }
+            }
+          };
+          walk('src');
+          console.log([...found].filter(p => !have.has(p)).join(' '));
+          SCAN_EOF
+          MISSING=$(node /tmp/scan-missing.cjs)
+          if [ -n "$MISSING" ]; then
+            echo "=== Installing missing plugin packages: $MISSING ==="
+            npm install $MISSING --legacy-peer-deps --no-audit --save || echo "WARNING: Some packages failed to install — the build may still fail."
+          else
+            echo "=== All imported Capacitor packages are present in package.json ==="
+          fi
+      - name: Resolve web output directory
+        run: |
+          echo 'Y29uc3QgZnM9cmVxdWlyZSgnZnMnKTsKZnVuY3Rpb24gcmVhZChwKXt0cnl7cmV0dXJuIGZzLnJlYWRGaWxlU3luYyhwLCd1dGY4Jyl9Y2F0Y2goZSl7cmV0dXJuICcnfX0KZnVuY3Rpb24gY2xlYW4ocyl7cmV0dXJuIFN0cmluZyhzfHwnJykudHJpbSgpLnJlcGxhY2UoL15cLlwvLywnJykucmVwbGFjZSgvXlwvKy8sJycpLnJlcGxhY2UoL1wvKyQvLCcnKX0KZnVuY3Rpb24gdmFsKHR4dCxrZXlzKXtmb3IoY29uc3QgayBvZiBrZXlzKXtjb25zdCBtPXR4dC5tYXRjaChuZXcgUmVnRXhwKCJbJ1wiYF0/IitrKyJbJ1wiYF0/XFxzKls6PV1cXHMqWydcImBdKFteJ1wiYF0rKVsnXCJgXSIpKTtpZihtKXJldHVybiBjbGVhbihtWzFdKX1yZXR1cm4gJyd9CmZ1bmN0aW9uIGFueU9mKGxpc3Qpe2Zvcihjb25zdCBmIG9mIGxpc3Qpe2NvbnN0IGM9cmVhZChmKTtpZihjKXJldHVybntmOmYsYzpjfX1yZXR1cm4gbnVsbH0KbGV0IGQ9Y2xlYW4ocHJvY2Vzcy5lbnYuTkJfV0VCX0RJUik7bGV0IHNyYz1kPydwbGF0Zm9ybSBwcm9qZWN0IGluZGV4JzonJzsKaWYoIWQpe2NvbnN0IGNhcD1hbnlPZihbJ2NhcGFjaXRvci5jb25maWcudHMnLCdjYXBhY2l0b3IuY29uZmlnLmpzJywnY2FwYWNpdG9yLmNvbmZpZy5qc29uJ10pO2lmKGNhcCl7Y29uc3QgbT1jYXAuYy5tYXRjaCgvd2ViRGlyXHMqWzo9XVxzKlsnXCJgXShbXidcImBdKykvKTtpZihtKXtkPWNsZWFuKG1bMV0pO3NyYz1jYXAuZisnIHdlYkRpcid9fX0KaWYoIWQpe2NvbnN0IGFqPXJlYWQoJ2FuZ3VsYXIuanNvbicpfHxyZWFkKCcuYW5ndWxhci5qc29uJyk7aWYoYWope3RyeXtjb25zdCBqPUpTT04ucGFyc2UoYWopO2NvbnN0IHBzPWoucHJvamVjdHN8fHt9O2NvbnN0IG5hbWU9KGouZGVmYXVsdFByb2plY3QmJnBzW2ouZGVmYXVsdFByb2plY3RdKT9qLmRlZmF1bHRQcm9qZWN0Ok9iamVjdC5rZXlzKHBzKS5maW5kKG49PnBzW25dLnByb2plY3RUeXBlIT09J2xpYnJhcnknKXx8T2JqZWN0LmtleXMocHMpWzBdO2NvbnN0IGI9KHBzW25hbWVdJiYocHNbbmFtZV0uYXJjaGl0ZWN0fHxwc1tuYW1lXS50YXJnZXRzKXx8e30pLmJ1aWxkfHx7fTtjb25zdCBvPWIub3B0aW9uc3x8e307Y29uc3QgcHI9KGIuY29uZmlndXJhdGlvbnN8fHt9KS5wcm9kdWN0aW9ufHx7fTtjb25zdCByYXc9cHIub3V0cHV0UGF0aHx8by5vdXRwdXRQYXRoO2xldCBiYXNlPScnLHN1Yj1udWxsO2lmKHR5cGVvZiByYXc9PT0nc3RyaW5nJyliYXNlPWNsZWFuKHJhdyk7ZWxzZSBpZihyYXcmJnR5cGVvZiByYXc9PT0nb2JqZWN0Jyl7YmFzZT1jbGVhbihyYXcuYmFzZSk7aWYodHlwZW9mIHJhdy5icm93c2VyPT09J3N0cmluZycpc3ViPWNsZWFuKHJhdy5icm93c2VyKX1pZighYmFzZSliYXNlPSdkaXN0LycrbmFtZTtsZXQgb3V0PWJhc2U7aWYoc3ViIT09bnVsbClvdXQ9c3ViP2Jhc2UrJy8nK3N1YjpiYXNlO2Vsc2UgaWYoU3RyaW5nKGIuYnVpbGRlcnx8JycpLmluZGV4T2YoJzphcHBsaWNhdGlvbicpPi0xKW91dD1iYXNlKycvYnJvd3Nlcic7ZD1vdXQ7c3JjPSdhbmd1bGFyLmpzb24gb3V0cHV0UGF0aCd9Y2F0Y2goZSl7fX19CmxldCBwa2c9e307dHJ5e3BrZz1KU09OLnBhcnNlKHJlYWQoJ3BhY2thZ2UuanNvbicpfHwne30nKX1jYXRjaChlKXt9CmNvbnN0IGRlcD1PYmplY3QuYXNzaWduKHt9LHBrZy5kZXBlbmRlbmNpZXMscGtnLmRldkRlcGVuZGVuY2llcyk7Y29uc3Qgc2M9cGtnLnNjcmlwdHN8fHt9OwppZighZCl7Y29uc3Qgbng9YW55T2YoWyduZXh0LmNvbmZpZy5qcycsJ25leHQuY29uZmlnLm1qcycsJ25leHQuY29uZmlnLnRzJywnbmV4dC5jb25maWcuY2pzJ10pO2lmKG54KXtjb25zdCBkZD12YWwobnguYyxbJ2Rpc3REaXInXSk7Y29uc3QgZXhwPS9vdXRwdXRccyo6XHMqWydcImBdZXhwb3J0WydcImBdLy50ZXN0KG54LmMpO2Q9ZGR8fChleHA/J291dCc6JycpO2lmKGQpc3JjPW54LmZ9fQppZighZCYmZGVwLm51eHQpe2Q9Jy5vdXRwdXQvcHVibGljJztzcmM9J251eHQgbml0cm8gc3RhdGljIG91dHB1dCd9CmlmKCFkKXtjb25zdCBhcz1hbnlPZihbJ2FzdHJvLmNvbmZpZy5tanMnLCdhc3Ryby5jb25maWcudHMnLCdhc3Ryby5jb25maWcuanMnXSk7aWYoYXMpe2Q9dmFsKGFzLmMsWydvdXREaXInXSl8fCdkaXN0JztzcmM9YXMuZn19CmlmKCFkKXtjb25zdCBzdj1hbnlPZihbJ3N2ZWx0ZS5jb25maWcuanMnLCdzdmVsdGUuY29uZmlnLnRzJywnc3ZlbHRlLmNvbmZpZy5tanMnXSk7aWYoc3YmJi9hZGFwdGVyLXN0YXRpYy8udGVzdChzdi5jKSl7ZD12YWwoc3YuYyxbJ3BhZ2VzJ10pfHwnYnVpbGQnO3NyYz1zdi5mKycgYWRhcHRlci1zdGF0aWMnfX0KaWYoIWQpe2NvbnN0IHE9YW55T2YoWydxdWFzYXIuY29uZmlnLmpzJywncXVhc2FyLmNvbmZpZy50cycsJ3F1YXNhci5jb25mLmpzJ10pO2lmKHEpe2Q9dmFsKHEuYyxbJ2Rpc3REaXInXSl8fCdkaXN0L3NwYSc7c3JjPXEuZn19CmlmKCFkKXtjb25zdCB2Yz1hbnlPZihbJ3Z1ZS5jb25maWcuanMnLCd2dWUuY29uZmlnLnRzJywndnVlLmNvbmZpZy5tanMnXSk7aWYodmMpe2Q9dmFsKHZjLmMsWydvdXRwdXREaXInXSl8fCdkaXN0JztzcmM9dmMuZn19CmlmKCFkKXtjb25zdCB2aT1hbnlPZihbJ3ZpdGUuY29uZmlnLnRzJywndml0ZS5jb25maWcuanMnLCd2aXRlLmNvbmZpZy5tanMnLCd2aXRlLmNvbmZpZy5tdHMnLCd2aXRlLmNvbmZpZy5janMnXSk7aWYodmkpe2NvbnN0IG89dmFsKHZpLmMsWydvdXREaXInXSk7aWYobyl7ZD1vO3NyYz12aS5mKycgYnVpbGQub3V0RGlyJ319fQppZighZCl7Y29uc3Qgd3A9YW55T2YoWyd3ZWJwYWNrLmNvbmZpZy5wcm9kLmpzJywnd2VicGFjay5wcm9kLmNvbmZpZy5qcycsJ3dlYnBhY2suY29uZmlnLmpzJywnd2VicGFjay5jb25maWcudHMnLCdyc3BhY2suY29uZmlnLmpzJ10pO2lmKHdwKXtjb25zdCBtPXdwLmMubWF0Y2goL3BhdGhccyo6XHMqKD86cGF0aFwuKD86cmVzb2x2ZXxqb2luKVxzKlwoXHMqX19kaXJuYW1lXHMqLFxzKik/WydcImBdKFteJ1wiYF0rKVsnXCJgXS8pO2lmKG0pe2Q9Y2xlYW4obVsxXSk7c3JjPXdwLmYrJyBvdXRwdXQucGF0aCd9fX0KaWYoIWQpe2NvbnN0IGVsZT1hbnlPZihbJy5lbGV2ZW50eS5qcycsJ2VsZXZlbnR5LmNvbmZpZy5qcycsJ2VsZXZlbnR5LmNvbmZpZy5tanMnXSk7aWYoZWxlKXtkPXZhbChlbGUuYyxbJ291dHB1dCddKXx8J19zaXRlJztzcmM9ZWxlLmZ9fQppZighZCYmc2MuYnVpbGQpe2NvbnN0IG09U3RyaW5nKHNjLmJ1aWxkKS5tYXRjaCgvLS0oPzpvdXQtZGlyfG91dERpcnxvdXRkaXJ8ZGlzdC1kaXJ8b3V0cHV0LXBhdGgpWz0gXSsoW15ccyInXSspLyk7aWYobSl7ZD1jbGVhbihtWzFdKTtzcmM9J3BhY2thZ2UuanNvbiBidWlsZCBzY3JpcHQgZmxhZyd9fQppZighZCl7aWYoZGVwLmdhdHNieSlkPSdwdWJsaWMnO2Vsc2UgaWYoZGVwWydAZG9jdXNhdXJ1cy9jb3JlJ10pZD0nYnVpbGQnO2Vsc2UgaWYoZGVwLnZpdGVwcmVzcylkPScudml0ZXByZXNzL2Rpc3QnO2Vsc2UgaWYoZGVwLnZ1ZXByZXNzKWQ9J2RvY3MvLnZ1ZXByZXNzL2Rpc3QnO2Vsc2UgaWYoZGVwWydAc3RlbmNpbC9jb3JlJ10pZD0nd3d3JztlbHNlIGlmKGRlcFsnQGlvbmljL2FuZ3VsYXInXXx8ZGVwWydAaW9uaWMvcmVhY3QnXXx8ZGVwWydAaW9uaWMvdnVlJ10pZD0nd3d3JztlbHNlIGlmKGRlcFsncmVhY3Qtc2NyaXB0cyddfHxkZXBbJ3ByZWFjdC1jbGknXXx8ZGVwLnNub3dwYWNrKWQ9J2J1aWxkJztlbHNlIGlmKGRlcC5oZXhvfHxkZXAuYnJ1bmNoKWQ9J3B1YmxpYyc7ZWxzZSBpZihkZXAubmV4dClkPSdvdXQnO2Vsc2UgaWYoZGVwWydAYW5ndWxhci9jb3JlJ10pZD0nZGlzdCc7ZWxzZSBpZihkZXAudml0ZXx8ZGVwWydAcnNidWlsZC9jb3JlJ118fGRlcC5wYXJjZWx8fGRlcC5yb2xsdXB8fGRlcC5lc2J1aWxkfHxkZXAudW1pfHxkZXBbJ2VtYmVyLWNsaSddKWQ9J2Rpc3QnO2lmKGQpc3JjPXNyY3x8J2ZyYW1ld29yayBkZWZhdWx0J30KaWYoZCl7ZD1jbGVhbihkKTtmcy5hcHBlbmRGaWxlU3luYyhwcm9jZXNzLmVudi5HSVRIVUJfRU5WLCdOQl9XRUJfRElSPScrZCsnXG4nKTtjb25zb2xlLmxvZygnW25hdGl2ZWZvcmdlXSB3ZWIgb3V0cHV0IGRpciAtPiAnK2QrJyAgKHNvdXJjZTogJysoc3JjfHwnZGVmYXVsdCcpKycpJyk7fQplbHNle2NvbnNvbGUubG9nKCdbbmF0aXZlZm9yZ2VdIG5vIHdlYiBvdXRwdXQgZGlyIGhpbnQ7IGZhbGxpbmcgYmFjayB0byBzY2FuJyk7fQ==' | base64 -d > /tmp/nb-webdir.cjs
+          node /tmp/nb-webdir.cjs
+      - name: 'Phase 3 · Build web project'
+        run: |
+          echo "=== Detecting build script ==="
+          BUILD_SCRIPT=""
+          for s in build build:prod generate; do
+            if node -e "const p=require('./package.json');process.exit(p.scripts&&p.scripts['$s']?0:1)" 2>/dev/null; then
+              BUILD_SCRIPT="$s"
+              break
+            fi
+          done
+          if [ -z "$BUILD_SCRIPT" ]; then
+            echo "WARNING: No build script found in package.json. Available scripts:"
+            node -e "console.log(Object.keys(require('./package.json').scripts||{}).join(', '))"
+          else
+            echo "=== Running: npm run $BUILD_SCRIPT ==="
+            if ! npm run "$BUILD_SCRIPT" 2>&1 | tee /tmp/nativebridge-web-build.log; then
+              EXIT=${PIPESTATUS[0]}
+              echo "=== WEB BUILD FAILED (exit $EXIT). Continuing with any existing output or a safe fallback. Last 80 lines: ==="
+              tail -80 /tmp/nativebridge-web-build.log || true
+            fi
+          fi
+          echo "=== Web build complete. Output dirs: ==="
+          FOUND_WEB_OUTPUT=""
+          for dir in $NB_WEB_DIR dist build www out .output/public .next; do
+            if [ -d "$dir" ]; then
+              FOUND_WEB_OUTPUT="${FOUND_WEB_OUTPUT} $dir"
+              echo "  found: $dir ($(du -sh $dir 2>/dev/null | cut -f1))"
+            fi
+          done
+          if [ -z "$FOUND_WEB_OUTPUT" ]; then
+            echo "::error::No usable web output directory was produced by the build. Refusing to synthesize a placeholder — that would ship a blank APK. Check the build log above."
+            exit 1
+          fi
+          true
+      - name: 'Phase 3 · Inject plugin config files'
+        run: if [ -f google-services.json ]; then mkdir -p android/app && cp google-services.json android/app/google-services.json; fi
+      - name: 'Phase 3 · Setup Capacitor'
+        run: |
+          CAP_VERSION=$(node -e "try{const p=require('./package.json');console.log((p.dependencies&&p.dependencies['@capacitor/core'])||(p.devDependencies&&p.devDependencies['@capacitor/core'])||'6.2.0')}catch(e){console.log('6.2.0')}" | sed 's/[\^~>=<]//g')
+          npm install @capacitor/core@$CAP_VERSION @capacitor/cli@$CAP_VERSION @capacitor/android@$CAP_VERSION --legacy-peer-deps
+          WEB_DIR=""
+          for dir in $NB_WEB_DIR dist build www out .output/public; do if [ -d "$dir" ] && [ "$(ls -A $dir 2>/dev/null)" ]; then WEB_DIR="$dir"; break; fi; done
+          if [ -z "$WEB_DIR" ]; then echo "::error::No web output directory to hand to Capacitor — aborting to avoid a blank APK."; exit 1; fi
+          if [ ! -f capacitor.config.ts ] && [ ! -f capacitor.config.json ] && [ ! -f capacitor.config.js ]; then
+            npx cap init "sggts" "com.nativebridge.app" --web-dir "$WEB_DIR"
+          else
+            echo "Reusing existing capacitor.config"
+          fi
+          if [ ! -d android ]; then
+            npx cap add android
+          else
+            echo "Reusing existing android/ folder (preserving user mipmap icons & customizations)"
+          fi
+      - name: 'Phase 3 · Inject back button handler'
+        run: |
+          npm install @capacitor/app --legacy-peer-deps || true
+          MAIN_FILE=$(find . -name "main.ts" -o -name "main.tsx" -o -name "index.ts" -o -name "index.tsx" | grep -v node_modules | head -1)
+          if [ -n "$MAIN_FILE" ]; then echo "import { App as CapApp } from '@capacitor/app'; CapApp.addListener('backButton', ({ canGoBack }) => { if (canGoBack) window.history.back(); else CapApp.exitApp(); });" >> "$MAIN_FILE"; fi
+      - name: 'Phase 3 · Generate App Icons (NativeBridge exact-size)'
+        run: |
+          if [ -f icon.png ]; then
+            npm install --save-dev sharp --legacy-peer-deps || true
+            mkdir -p scripts
+            cat > scripts/nativebridge-generate-android-assets.cjs <<'NBASSETS'
+            const fs = require('fs');
+            const path = require('path');
+            let sharp; try { sharp = require('sharp'); } catch { console.error('sharp missing'); process.exit(1); }
+            function parseArgs(a){ const o={iconBackground:'#FFFFFF'}; for(let i=2;i<a.length;i++){const x=a[i]; if(x==='--source')o.source=a[++i]; else if(x==='--foreground')o.foreground=a[++i]; else if(x==='--res')o.res=a[++i]; else if(x==='--background')o.background=a[++i]; else if(x==='--iconBackground')o.iconBackground=a[++i]; else if(x==='--splash')o.splash=a[++i];} return o; }
+            function walk(d,r=[]){ if(!fs.existsSync(d)) return r; for(const e of fs.readdirSync(d,{withFileTypes:true})){ const f=path.join(d,e.name); if(e.isDirectory()) walk(f,r); else if(e.isFile()&&e.name.toLowerCase().endsWith('.png')) r.push(f);} return r; }
+            function role(p){ const n=path.basename(p).toLowerCase(); const dir=path.basename(path.dirname(p)); if(n.includes('foreground')) return 'adaptiveForeground'; if(n.includes('background')) return 'adaptiveBackground'; if(n.includes('round')) return 'launcherRound'; if(n.includes('splash')) return 'splash'; if(dir.startsWith('mipmap')) return 'launcher'; if(dir.startsWith('drawable')&&n.startsWith('ic_')) return 'launcher'; return 'other'; }
+            function hexToRgb(h){ h=(h||'').replace('#',''); if(h.length===3) h=h.split('').map(c=>c+c).join(''); if(h.length===8) h=h.slice(0,6); const n=parseInt(h,16); if(!Number.isFinite(n)) return {r:255,g:255,b:255,alpha:1}; return {r:(n>>16)&255,g:(n>>8)&255,b:n&255,alpha:1}; }
+            function roundedMaskSvg(w,h,rPct){ const r=Math.round(Math.min(w,h)*(rPct/100)); return Buffer.from(`<svg width="${w}" height="${h}"><rect x="0" y="0" width="${w}" height="${h}" rx="${r}" ry="${r}" fill="white"/></svg>`); }
+            function circleMaskSvg(w,h){ return Buffer.from(`<svg width="${w}" height="${h}"><circle cx="${w/2}" cy="${h/2}" r="${Math.min(w,h)/2}" fill="white"/></svg>`); }
+            async function flattenedLauncher(fgBuf, w, h, iconBg, maskSvg){
+              const scale=0.78; const inner=Math.round(Math.min(w,h)*scale);
+              const fgFit=await sharp(fgBuf).resize(inner,inner,{fit:'contain',background:{r:0,g:0,b:0,alpha:0}}).png().toBuffer();
+              const off=Math.round((w-inner)/2);
+              const base=await sharp({create:{width:w,height:h,channels:4,background:hexToRgb(iconBg)}}).composite([{input:fgFit,left:off,top:off}]).png().toBuffer();
+              return await sharp(base).composite([{input:maskSvg,blend:'dest-in'}]).png().toBuffer();
+            }
+            async function gen(buf, fgBuf, role, w, h, opts){ const bg=opts.background||'#FFFFFF'; const iconBg=opts.iconBackground||'#FFFFFF';
+              const fg = fgBuf || buf;
+              if(role==='launcher'){ return await flattenedLauncher(fg, w, h, iconBg, roundedMaskSvg(w,h,22)); }
+              if(role==='launcherRound'){ return await flattenedLauncher(fg, w, h, iconBg, circleMaskSvg(w,h)); }
+              if(role==='adaptiveForeground'){ const inner=Math.round(w*0.5); const off=Math.round((w-inner)/2); return await sharp({create:{width:w,height:h,channels:4,background:{r:0,g:0,b:0,alpha:0}}}).composite([{input: await sharp(fg).resize(inner,inner,{fit:'contain',background:{r:0,g:0,b:0,alpha:0}}).png().toBuffer(), left:off, top:off}]).png().toBuffer(); }
+              if(role==='adaptiveBackground') return await sharp({create:{width:w,height:h,channels:4,background:hexToRgb(iconBg)}}).png().toBuffer();
+              if(role==='splash'){ const ss=opts.splashBuffer||fg; return await sharp({create:{width:w,height:h,channels:4,background:hexToRgb(bg)}}).composite([{input: await sharp(ss).resize(Math.round(Math.min(w,h)*0.35),Math.round(Math.min(w,h)*0.35),{fit:'contain',background:{r:0,g:0,b:0,alpha:0}}).png().toBuffer(), gravity:'center'}]).png().toBuffer(); }
+              return await sharp(buf).resize(w,h,{fit:'cover'}).png().toBuffer();
+            }
+            (async()=>{ const a=parseArgs(process.argv);
+              // Resolve background from appearance.json if present (single source of truth)
+              try { if(fs.existsSync('appearance.json')){ const ap=JSON.parse(fs.readFileSync('appearance.json','utf8')); if(ap && ap.splash && ap.splash.bg && !a.background) a.background=ap.splash.bg; if(ap && ap.icon && ap.icon.bg) a.iconBackground=ap.icon.bg; } } catch(e){}
+              // Auto-detect foreground file if not passed explicitly
+              if(!a.foreground && fs.existsSync('icon_fg.png')) a.foreground='icon_fg.png';
+              if(!fs.existsSync(a.source)||!fs.existsSync(a.res)){ console.error('Missing source or res'); process.exit(1);}
+              const buf=fs.readFileSync(a.source);
+              const fgBuf=a.foreground&&fs.existsSync(a.foreground)?fs.readFileSync(a.foreground):null;
+              const splashBuffer=a.splash&&fs.existsSync(a.splash)?fs.readFileSync(a.splash):null;
+              console.log(`[assets] iconBg=${a.iconBackground} splashBg=${a.background} foreground=${fgBuf?'yes':'no'}`);
+              const pngs=walk(a.res); console.log(`[assets] Found ${pngs.length} PNG(s)`);
+              let n=0; for(const f of pngs){ try{ const m=await sharp(f).metadata(); if(!m.width||!m.height) continue; const r=role(f); const out=await gen(buf,fgBuf,r,m.width,m.height,{background:a.background,iconBackground:a.iconBackground,splashBuffer}); fs.writeFileSync(f,out); n++; }catch(e){ console.warn('skip',f,e.message); } }
+              console.log(`[assets] Replaced ${n}/${pngs.length}`);
+            })().catch(e=>{ console.error(e); process.exit(1); });
+          NBASSETS
+            SPLASH_ARG=""; [ -f splash.png ] && SPLASH_ARG="--splash splash.png"
+            FG_ARG=""; [ -f icon_fg.png ] && FG_ARG="--foreground icon_fg.png"
+            node scripts/nativebridge-generate-android-assets.cjs --source icon.png $FG_ARG $SPLASH_ARG --res android/app/src/main/res || echo "Asset generator returned non-zero (continuing)"
+          fi
+      - name: 'Phase 3 · Deduplicate launcher resources'
+        run: |
+          # Resolve "Duplicate resources" errors: when both ic_launcher_background.xml and .png
+          # (or _foreground.xml and .png) exist in the same res/ folder, keep the PNG (generated
+          # by our asset script) and drop the XML so mergeDebugResources doesn't fail.
+          find android/app/src/main/res -type d \( -name 'drawable*' -o -name 'mipmap*' \) 2>/dev/null | while IFS= read -r dir; do
+            for base in ic_launcher_background ic_launcher_foreground ic_launcher ic_launcher_round; do
+              if [ -f "$dir/$base.png" ] && [ -f "$dir/$base.xml" ]; then
+                echo "[dedup] Removing $dir/$base.xml (PNG takes precedence)"
+                rm -f "$dir/$base.xml"
+              fi
+            done
+          done || true
+      - name: 'Phase 3 · Pre-sync hardening'
+        run: |
+          for f in capacitor.config.ts capacitor.config.js capacitor.config.json; do
+            [ -f "$f" ] && sed -i -E 's/("?server"?s*:s*{[^}]*}s*,?)//g' "$f" || true
+          done
+          for d in $NB_WEB_DIR dist build www out .output/public; do
+            [ -f "$d/index.html" ] && sed -i -E 's/(src|href)="/(?!/)/\1=".//g' "$d/index.html" || true
+          done
+      - name: 'Phase 3 · Sync Capacitor'
+        run: npx cap sync android
+      - name: 'Phase 3 · Post-sync smoke check'
+        run: |
+          IDX=android/app/src/main/assets/public/index.html
+          if [ ! -f "$IDX" ]; then echo "::error::No index.html synced — APK will be blank."; exit 1; fi
+          B=$(wc -c < "$IDX"); echo "[smoke] $B bytes"
+          [ "$B" -lt 80 ] && { echo "::error::index.html essentially empty — blank APK."; exit 1; } || true
+          grep -qE '<script[ >]' "$IDX" || echo "::warning::No <script> tags in index.html"
+
+      - name: 'Phase 3 · Install Android SDK'
+        run: $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-36" "build-tools;36.0.0" || true
+      - name: 'Phase 3 · Patch SDK versions'
+        run: |
+          printf '%s\n' 'ext {' '    minSdkVersion = 24' '    compileSdkVersion = 36' '    targetSdkVersion = 36' "    androidxActivityVersion = '1.9.3'" "    androidxAppCompatVersion = '1.7.0'" "    androidxCoordinatorLayoutVersion = '1.2.0'" "    androidxCoreVersion = '1.15.0'" "    androidxFragmentVersion = '1.8.5'" "    coreSplashScreenVersion = '1.0.1'" "    androidxWebkitVersion = '1.12.1'" "    junitVersion = '4.13.2'" "    androidxJunitVersion = '1.2.1'" "    androidxEspressoCoreVersion = '3.6.1'" "    cordovaAndroidVersion = '10.1.1'" '}' > android/variables.gradle
+          find android -type f -name "build.gradle" | while IFS= read -r file; do sed -i -E -e 's/compileSdk[[:space:]]+[0-9]+/compileSdk 36/g' -e 's/compileSdkVersion[[:space:]]+[0-9]+/compileSdkVersion 36/g' -e 's/minSdk[[:space:]]+[0-9]+/minSdk 24/g' -e 's/targetSdk[[:space:]]+[0-9]+/targetSdk 36/g' -e 's/versionCode[[:space:]]+[0-9]+/versionCode 1/g' -e 's/versionName[[:space:]]+"[^"]*"/versionName "1.0.0"/g' "$file" || true; done
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then sed -i 's|distributionUrl=.*|distributionUrl=https\://services.gradle.org/distributions/gradle-8.10.2-bin.zip|' android/gradle/wrapper/gradle-wrapper.properties; fi
+      - name: 'Phase 3 · Build Debug APK'
+        working-directory: android
+
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+      # AAB build skipped — focusing on APK builds for now
+      - name: Extract Signing Key Fingerprints
+        if: always()
+        working-directory: android
+        run: |
+          KEYSTORE_FILE=""; if [ -f "release.keystore" ]; then KEYSTORE_FILE="release.keystore"; else KEYSTORE_FILE=$(find . -name "debug.keystore" -o -name "*.jks" -o -name "*.keystore" 2>/dev/null | head -1); fi
+          if [ -n "$KEYSTORE_FILE" ]; then STORE_PASS="android"; if [ -f "key.properties" ]; then STORE_PASS=$(grep '^storePassword=' key.properties | cut -d= -f2-); fi; keytool -list -v -keystore "$KEYSTORE_FILE" -storepass "$STORE_PASS" 2>/dev/null | grep -E "SHA1:|SHA256:|MD5:" || true; base64 -w 0 "$KEYSTORE_FILE" > ../keystore-export.b64 2>/dev/null || true; fi
+      - name: Upload Keystore
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: keystore-export
+          path: keystore-export.b64
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: phase1-source
-          path: phase1-source.zip
-          retention-days: 1
-# build-nonce: 45c983f1-f094-43cf-a261-8450862ed587
+          name: debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 7
+          if-no-files-found: error
+      # AAB upload skipped — focusing on APK builds for now
+
+# build-nonce: e3e2ca33-d539-40b0-bca7-fcf7022a3a10
